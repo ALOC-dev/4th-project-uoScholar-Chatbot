@@ -170,6 +170,37 @@ def get_vectorstore():
     return _vectorstore
 
 
+# ===== 공지 관련성 체크 =====
+def check_if_notice_related(user_input: str) -> bool:
+    """최신 사용자 입력이 공지사항과 관련된 질문인지 빠르게 판단"""
+
+    prompt = f"""다음 사용자 입력이 "대학 공지사항을 찾는 질문"인지 판단하세요.
+
+사용자 입력: {user_input}
+
+**공지사항 관련 예시:**
+- 장학금, 학사일정, 수강신청, 취업, 행사, 프로그램, 신청, 모집, 세미나, 워크숍 등
+- "창업 관련 공지 있어?", "장학금 신청 언제까지야?", "교환학생 신청 방법"
+
+**공지사항 무관 예시:**
+- 인사말 ("안녕", "반가워", "고마워")
+- 잡담 ("날씨 어때?", "점심 뭐 먹지?")
+- 일반 질문 ("학교 위치가 어디야?", "너는 누구야?")
+
+다음 중 하나로만 답변하세요:
+- "yes" (공지사항 관련 질문)
+- "no" (공지사항 무관)
+
+답변:"""
+
+    llm = get_llm()
+    response = llm.invoke(prompt)
+    answer = response.content.strip().lower()
+
+    # "yes" 포함 여부로 판단
+    return "yes" in answer
+
+
 # ===== 대화 요구사항 분석 =====
 def extract_requirements(conversation_history: List[Dict[str, str]]) -> Dict[str, Any]:
     """대화 히스토리에서 사용자 요구사항 추출 (LLM 기반)"""
@@ -217,7 +248,7 @@ JSON만 응답하세요:"""
 
         requirements = json.loads(content)
 
-        # is_notice_related 필드 확인 (없으면 기본값 true)
+        # is_notice_related 필드 확인 (없으면 기본값 True)
         if "is_notice_related" not in requirements:
             requirements["is_notice_related"] = True
 
@@ -677,20 +708,30 @@ def chat_stream(request: ChatRequest):
             })
 
             current_turn = len([m for m in messages if m["role"] == "user"])
-        
-            requirements = extract_requirements(messages)
-            
 
-            # 공지사항 관련 질문인지 확인
-            is_notice_related = requirements.get("is_notice_related", True)
+            # 먼저 최신 사용자 입력만으로 공지 관련성 체크
+            latest_user_message = request.query
+            is_notice_related = check_if_notice_related(latest_user_message)
 
             if not is_notice_related:
                 # 공지사항과 관련 없는 질문: 일반 대화 응답
-                casual_response = generate_casual_response(messages)
+                # 히스토리에 반영하지 않기 위해 messages에서 방금 추가한 메시지 제거
+                messages.pop()  # 마지막에 추가한 현재 사용자 메시지 제거
+
+                # 최신 메시지만 포함한 임시 히스토리로 응답 생성
+                temp_messages = messages + [{
+                    "role": "user",
+                    "content": request.query,
+                    "timestamp": datetime.now().isoformat()
+                }]
+                casual_response = generate_casual_response(temp_messages)
 
                 yield f"data: {json.dumps({'type': 'content', 'content': casual_response})}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': None})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': None, 'not_saved': True})}\n\n"
                 return
+
+            # 공지 관련 질문이면 전체 대화 맥락으로 요구사항 추출
+            requirements = extract_requirements(messages)
 
             # 공지사항 관련 질문: 최적 공지 찾기
             best_notice = find_best_notice(requirements)
