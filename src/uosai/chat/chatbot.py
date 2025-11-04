@@ -686,6 +686,7 @@ def health_check():
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
+
 @app.post("/chat/stream")
 def chat_stream(request: ChatRequest):
     """대화형 공지 추천 엔드포인트 (스트리밍 - 즉시 시작, 느린 속도)"""
@@ -714,28 +715,8 @@ def chat_stream(request: ChatRequest):
             })
 
             current_turn = len([m for m in messages if m["role"] == "user"])
-            if current_turn == 1:
-                # 키워드 간단 추출(LLM 미사용)
-                toks = re.split(r"[\s,./;:()\[\]{}!?~\-_=+|\\]+", request.query.strip())
-                keywords = []
-                seen = set()
-                for w in toks:
-                    if len(w) > 1 and w not in STOPWORDS and w not in seen:
-                        seen.add(w)
-                        keywords.append(w)
-                    if len(keywords) >= 5:
-                        break
-
-                requirements = {
-                    "is_notice_related": True,
-                    "category": "기타",
-                    "keywords": keywords if keywords else [request.query.strip()],
-                    "target_audience": "전체",
-                    "urgency": "보통",
-                    "specific_requirements": request.query.strip(),  # ← 리트리버 쿼리로 바로 사용
-                }
-            else:
-                requirements = extract_requirements(messages)
+        
+            requirements = extract_requirements(messages)
             
 
             # 공지사항 관련 질문인지 확인
