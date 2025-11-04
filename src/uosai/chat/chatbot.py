@@ -1,8 +1,9 @@
-# chatbot.py - 대화형 공지 추천 챗봇
+# chatbot_fast.py - 대화형 공지 추천 챗봇
 import os
 import re
 import json
 import logging
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -13,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
@@ -36,7 +37,7 @@ TOP_K = int(os.getenv("TOP_K", "12"))
 
 # 검색 설정 (Cohere Reranker 사용)
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
-INITIAL_SEARCH_K = int(os.getenv("INITIAL_SEARCH_K", "20"))  # 초기 검색 개수 (속도 최적화)
+INITIAL_SEARCH_K = int(os.getenv("INITIAL_SEARCH_K", "50"))  # 초기 검색 개수 (속도 최적화)
 FINAL_TOP_K = int(os.getenv("FINAL_TOP_K", "5"))  # Reranker 후 최종 개수
 RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # Reranker 점수 임계값 (더 관대하게)
 
@@ -171,7 +172,7 @@ def get_vectorstore():
 
 # ===== 대화 요구사항 분석 =====
 def extract_requirements(conversation_history: List[Dict[str, str]]) -> Dict[str, Any]:
-    """대화 히스토리에서 사용자 요구사항 추출"""
+    """대화 히스토리에서 사용자 요구사항 추출 (LLM 기반)"""
 
     # 모든 사용자 메시지를 합쳐서 분석
     user_messages = [msg["content"] for msg in conversation_history if msg["role"] == "user"]
@@ -565,6 +566,47 @@ def generate_final_recommendation(requirements: Dict[str, Any], notice: Dict[str
     response = llm.invoke(prompt)
     return response.content.strip()
 
+def generate_final_recommendation_stream(requirements: Dict[str, Any], notice: Dict[str, Any], conversation_history: List[Dict[str, str]], delay: float = 0.03):
+    """최종 추천 메시지 스트리밍 생성 (속도 조절 가능)"""
+
+    conversation_summary = " ".join([msg["content"] for msg in conversation_history if msg["role"] == "user"])
+
+    # 현재 날짜 정보 추가
+    now = datetime.now()
+    current_date_str = now.strftime("%Y년 %m월 %d일")
+
+    prompt = f"""**현재 날짜: {current_date_str}**
+
+사용자가 다음과 같이 질문했습니다: "{conversation_summary}"
+
+이에 대한 답변으로 적합한 공지사항을 찾았습니다:
+
+**공지사항 정보:**
+- 제목: {notice.get('title')}
+- 주관: {notice.get('department')}
+- 게시일: {notice.get('posted_date')}
+- 내용: {notice.get('content')[:1000]}
+
+**지침:**
+1. 기간에 대한 답변을 할 경우, **현재 날짜를 고려하여** 모집/신청 기간이 지났는지, 진행 중인지, 예정인지 명확히 알려주세요
+2. 사용자의 구체적인 질문에 직접적으로 답변하세요
+3. 공지사항의 내용에서 사용자가 궁금해하는 부분을 중점적으로 설명하세요
+4. 형식적인 "행사:", "장소:" 같은 구조화된 답변 금지
+5. 자연스럽고 대화적인 톤으로 작성하세요
+6. 사용자가 알고 싶어하는 핵심 정보(언제, 어디서, 누가, 어떻게)를 자연스럽게 포함하세요
+7. 마지막에 링크: {notice.get('link')} 제공
+
+자연스럽고 친근한 답변을 작성해주세요:"""
+
+    llm = get_llm()
+
+    # 스트리밍 응답 생성 (천천히)
+    for chunk in llm.stream(prompt):
+        if chunk.content:
+            # 토큰마다 딜레이 추가 (읽기 편한 속도)
+            time.sleep(delay)
+            yield chunk.content
+
 # ===== 앱 초기화 및 모델 프리로딩 =====
 def preload_models():
     """앱 시작 시 모든 모델을 미리 로드하여 첫 요청 속도 개선"""
@@ -609,8 +651,8 @@ async def lifespan(app: FastAPI):
 
 # ===== FastAPI 앱 =====
 app = FastAPI(
-    title="Notice Recommendation Chatbot",
-    version="1.0.0",
+    title="Notice Recommendation Chatbot (Fast Version)",
+    version="1.0.0-fast",
     lifespan=lifespan
 )
 
@@ -644,79 +686,95 @@ def health_check():
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
-    """대화형 공지 추천 엔드포인트 (Stateless)"""
-    try:
-        # 클라이언트로부터 받은 대화 내역을 딕셔너리로 변환
-        messages = [msg.dict() for msg in request.conversation_history]
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    """대화형 공지 추천 엔드포인트 (스트리밍 - 즉시 시작, 느린 속도)"""
 
-        # 입력 검증
+    def generate():
         try:
-            validate_input(request.query, messages)
-        except ValidationError as ve:
-            logging.warning(f"Validation failed: {ve}")
-            return ChatResponse(
-                response=str(ve),
-                turn=0,
-                recommended_notice=None
-            )
+            # 즉시 검색 시작 메시지 전송 (즉각적인 피드백)
+            yield f"data: {json.dumps({'type': 'status', 'content': 'searching'})}\n\n"
 
-        # 현재 사용자 메시지 추가
-        messages.append({
-            "role": "user",
-            "content": request.query,
-            "timestamp": datetime.now().isoformat()
-        })
+            # 클라이언트로부터 받은 대화 내역을 딕셔너리로 변환
+            messages = [msg.dict() for msg in request.conversation_history]
 
-        current_turn = len([m for m in messages if m["role"] == "user"])
+            # 입력 검증
+            try:
+                validate_input(request.query, messages)
+            except ValidationError as ve:
+                logging.warning(f"Validation failed: {ve}")
+                yield f"data: {json.dumps({'type': 'error', 'content': str(ve)})}\n\n"
+                return
 
-        # 매 턴마다 요구사항 추출
-        requirements = extract_requirements(messages)
+            # 현재 사용자 메시지 추가
+            messages.append({
+                "role": "user",
+                "content": request.query,
+                "timestamp": datetime.now().isoformat()
+            })
 
-        # 공지사항 관련 질문인지 확인
-        is_notice_related = requirements.get("is_notice_related", True)
+            current_turn = len([m for m in messages if m["role"] == "user"])
+            if current_turn == 1:
+                # 키워드 간단 추출(LLM 미사용)
+                toks = re.split(r"[\s,./;:()\[\]{}!?~\-_=+|\\]+", request.query.strip())
+                keywords = []
+                seen = set()
+                for w in toks:
+                    if len(w) > 1 and w not in STOPWORDS and w not in seen:
+                        seen.add(w)
+                        keywords.append(w)
+                    if len(keywords) >= 5:
+                        break
 
-        if not is_notice_related:
-            # 공지사항과 관련 없는 질문: 일반 대화 응답
-            casual_response = generate_casual_response(messages)
+                requirements = {
+                    "is_notice_related": True,
+                    "category": "기타",
+                    "keywords": keywords if keywords else [request.query.strip()],
+                    "target_audience": "전체",
+                    "urgency": "보통",
+                    "specific_requirements": request.query.strip(),  # ← 리트리버 쿼리로 바로 사용
+                }
+            else:
+                requirements = extract_requirements(messages)
+            
 
-            return ChatResponse(
-                response=casual_response,
-                turn=current_turn,
-                recommended_notice=None
-            )
+            # 공지사항 관련 질문인지 확인
+            is_notice_related = requirements.get("is_notice_related", True)
 
-        # 공지사항 관련 질문: 최적 공지 찾기
-        best_notice = find_best_notice(requirements)
+            if not is_notice_related:
+                # 공지사항과 관련 없는 질문: 일반 대화 응답
+                casual_response = generate_casual_response(messages)
 
-        if best_notice:
-            # 공지를 찾았을 때: 최종 추천 메시지 생성
-            final_response = generate_final_recommendation(requirements, best_notice, messages)
+                yield f"data: {json.dumps({'type': 'content', 'content': casual_response})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': None})}\n\n"
+                return
 
-            return ChatResponse(
-                response=final_response,
-                turn=current_turn,
-                recommended_notice=best_notice
-            )
-        else:
-            # 공지를 찾지 못했을 때: 명확화 질문 생성
-            clarifying_question = generate_clarifying_question(current_turn, messages)
+            # 공지사항 관련 질문: 최적 공지 찾기
+            best_notice = find_best_notice(requirements)
 
-            return ChatResponse(
-                response=clarifying_question,
-                turn=current_turn,
-                recommended_notice=None
-            )
+            if best_notice:
+                # 공지를 찾았다는 신호 전송
+                yield f"data: {json.dumps({'type': 'status', 'content': 'found'})}\n\n"
 
-    except Exception as e:
-        logging.error(f"Chat error: {e}", exc_info=True)
-        return ChatResponse(
-            response="죄송합니다. 일시적인 오류가 발생했습니다. 다시 시도해주세요.",
-            turn=0,
-            recommended_notice=None
-        )
+                # 스트리밍으로 최종 추천 메시지 생성 (천천히)
+                for chunk in generate_final_recommendation_stream(requirements, best_notice, messages, delay=0.03):
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+
+                # 완료 신호와 공지 정보 전송
+                yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': best_notice})}\n\n"
+            else:
+                # 공지를 찾지 못했을 때: 명확화 질문 생성
+                clarifying_question = generate_clarifying_question(current_turn, messages)
+
+                yield f"data: {json.dumps({'type': 'content', 'content': clarifying_question})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': None})}\n\n"
+
+        except Exception as e:
+            logging.error(f"Chat stream error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'content': '죄송합니다. 일시적인 오류가 발생했습니다. 다시 시도해주세요.'})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
