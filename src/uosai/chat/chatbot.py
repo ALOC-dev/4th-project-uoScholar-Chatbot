@@ -530,41 +530,6 @@ def find_best_notice(requirements: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logging.error("[RECOMMEND] Unexpected error in find_best_notice: %s", e, exc_info=True)
         return None
 
-def generate_final_recommendation(requirements: Dict[str, Any], notice: Dict[str, Any], conversation_history: List[Dict[str, str]]) -> str:
-    """최종 추천 메시지 생성"""
-
-    conversation_summary = " ".join([msg["content"] for msg in conversation_history if msg["role"] == "user"])
-
-    # 현재 날짜 정보 추가
-    now = datetime.now()
-    current_date_str = now.strftime("%Y년 %m월 %d일")
-
-    prompt = f"""**현재 날짜: {current_date_str}**
-
-사용자가 다음과 같이 질문했습니다: "{conversation_summary}"
-
-이에 대한 답변으로 적합한 공지사항을 찾았습니다:
-
-**공지사항 정보:**
-- 제목: {notice.get('title')}
-- 주관: {notice.get('department')}
-- 게시일: {notice.get('posted_date')}
-- 내용: {notice.get('content')[:1000]}
-
-**지침:**
-1. 기간에 대한 답변을 할 경우, **현재 날짜를 고려하여** 모집/신청 기간이 지났는지, 진행 중인지, 예정인지 명확히 알려주세요
-2. 사용자의 구체적인 질문에 직접적으로 답변하세요
-3. 공지사항의 내용에서 사용자가 궁금해하는 부분을 중점적으로 설명하세요
-4. 형식적인 "행사:", "장소:" 같은 구조화된 답변 금지
-5. 자연스럽고 대화적인 톤으로 작성하세요
-6. 사용자가 알고 싶어하는 핵심 정보(언제, 어디서, 누가, 어떻게)를 자연스럽게 포함하세요
-7. 마지막에 링크: {notice.get('link')} 제공
-
-자연스럽고 친근한 답변을 작성해주세요:"""
-
-    llm = get_llm()
-    response = llm.invoke(prompt)
-    return response.content.strip()
 
 def generate_final_recommendation_stream(requirements: Dict[str, Any], notice: Dict[str, Any], conversation_history: List[Dict[str, str]], delay: float = 0.03):
     """최종 추천 메시지 스트리밍 생성 (속도 조절 가능)"""
@@ -594,7 +559,6 @@ def generate_final_recommendation_stream(requirements: Dict[str, Any], notice: D
 4. 형식적인 "행사:", "장소:" 같은 구조화된 답변 금지
 5. 자연스럽고 대화적인 톤으로 작성하세요
 6. 사용자가 알고 싶어하는 핵심 정보(언제, 어디서, 누가, 어떻게)를 자연스럽게 포함하세요
-7. 마지막에 링크: {notice.get('link')} 제공
 
 자연스럽고 친근한 답변을 작성해주세요:"""
 
